@@ -1,0 +1,15 @@
+[package]
+name = "man_search"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "index"
+path = "src/bin/index.rs"
+
+[[bin]]
+name = "search"
+path = "src/bin/search.rs"
+
+[dependencies]
+rust-stemmers = "1.0"
