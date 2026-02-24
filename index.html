@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lightning Man</title>
+        <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #38bdf8;
+            --border: #334155;
+            --hover: #2dd4bf;
+            --flag-color: #facc15; /* Yellow for command flags */
+            --ref-color: #f472b6;   /* Pink for man page cross-references */
+            --path-color: #a78bfa;  /* Purple for file paths */
+            --header-color: #fb923c; /* Orange for section headers */
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #sidebar {
+            width: 350px;
+            min-width: 300px;
+            background-color: var(--panel-bg);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            z-index: 10;
+        }
+
+        #search-container {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        #search-box {
+            width: 100%;
+            padding: 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-size: 16px;
+            outline: none;
+            box-sizing: border-box;
+        }
+
+        #search-box:focus {
+            border-color: var(--accent);
+        }
+
+        #results-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            list-style: none;
+            margin: 0;
+        }
+
+        .result-item {
+            padding: 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-bottom: 8px;
+            border: 1px solid transparent;
+        }
+
+        .result-item:hover {
+            background-color: var(--border);
+        }
+
+        .result-item.active {
+            border-color: var(--accent);
+            background-color: rgba(56, 189, 248, 0.1);
+        }
+
+        .result-title {
+            font-weight: bold;
+            color: var(--accent);
+            font-size: 15px;
+            margin-bottom: 4px;
+        }
+
+        .result-desc {
+            font-size: 13px;
+            color: var(--text-muted);
+            line-height: 1.4;
+        }
+
+        #content-pane {
+            flex: 1;
+            padding: 30px;
+            overflow-y: auto;
+            overflow-x: auto; /* Allows wide manuals to scroll smoothly */
+            background-color: var(--bg-color);
+        }
+
+        pre {
+            /* Changed from pre-wrap to prevent aggressive cutting */
+            white-space: pre; 
+            font-family: 'JetBrains Mono', 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            color: var(--text-main);
+            margin: 0;
+        }
+
+        pre b {
+            color: var(--accent);
+            font-weight: bold;
+        }
+
+        pre u {
+            color: var(--hover);
+            text-decoration: underline;
+            text-decoration-thickness: 1px;
+            text-underline-offset: 2px;
+        }
+
+        /* Our new syntax highlighting class */
+        .flag {
+            color: var(--flag-color);
+            font-weight: bold;
+        }
+
+        .empty-state {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-muted);
+            font-size: 18px;
+        }
+        </style>
+    </head>
+    <body>
+
+        <div id="sidebar">
+            <div id="search-container">
+                <input type="text" id="search-box" placeholder="Search commands..." autocomplete="off" autofocus>
+            </div>
+            <ul id="results-list"></ul>
+        </div>
+
+        <div id="content-pane">
+            <div id="viewer" class="empty-state">Start typing to search the manuals.</div>
+        </div>
+
+        <script>
+        const searchBox = document.getElementById('search-box');
+        const resultsList = document.getElementById('results-list');
+        const viewer = document.getElementById('viewer');
+
+        let debounceTimeout = null;
+        let currentResults = [];
+        let selectedIndex = -1;
+
+        searchBox.addEventListener('input', (e) => {
+            clearTimeout(debounceTimeout);
+            const query = e.target.value.trim();
+
+            if (!query) {
+                resultsList.innerHTML = '';
+                currentResults = [];
+                selectedIndex = -1;
+                return;
+            }
+
+            debounceTimeout = setTimeout(() => fetchResults(query), 150);
+        });
+
+        // Keyboard Navigation
+        searchBox.addEventListener('keydown', (e) => {
+            if (currentResults.length === 0) return;
+
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                selectedIndex = Math.min(selectedIndex + 1, currentResults.length - 1);
+                updateSelection();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                selectedIndex = Math.max(selectedIndex - 1, 0);
+                updateSelection();
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (selectedIndex >= 0 && selectedIndex < currentResults.length) {
+                    const selectedFname = currentResults[selectedIndex].fname;
+                    loadDocument(selectedFname);
+                }
+            }
+        });
+
+        function updateSelection() {
+            const items = resultsList.querySelectorAll('.result-item');
+            items.forEach((item, index) => {
+                if (index === selectedIndex) {
+                    item.classList.add('active');
+                    item.scrollIntoView({ block: 'nearest' });
+                } else {
+                    item.classList.remove('active');
+                }
+            });
+        }
+
+        async function fetchResults(query) {
+            try {
+                const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+                const data = await response.json();
+                currentResults = data;
+                selectedIndex = data.length > 0 ? 0 : -1;
+                renderResults(data);
+            } catch (err) {
+                console.error("Search failed:", err);
+            }
+        }
+
+        function renderResults(results) {
+            resultsList.innerHTML = '';
+
+            if (results.length === 0) {
+                resultsList.innerHTML = '<li class="result-item"><div class="result-desc">No results found.</div></li>';
+                return;
+            }
+
+            results.forEach((res, index) => {
+                const li = document.createElement('li');
+                li.className = 'result-item';
+                if (index === selectedIndex) {
+                    li.classList.add('active');
+                }
+
+                const cleanName = res.fname.split('.')[0];
+
+                li.innerHTML = `
+<div class="result-title">${cleanName}</div>
+<div class="result-desc">${res.name_desc || 'No description available.'}</div>
+`;
+
+                li.addEventListener('click', () => {
+                    selectedIndex = index;
+                    updateSelection();
+                    loadDocument(res.fname);
+                    searchBox.focus();
+                });
+
+                resultsList.appendChild(li);
+            });
+        }
+
+        async function loadDocument(fname) {
+            // Re-add the class for the loading state
+            viewer.classList.add('empty-state');
+            viewer.innerHTML = 'Loading manual...';
+
+            try {
+                const response = await fetch(`/api/content?fname=${encodeURIComponent(fname)}`);
+                const data = await response.json();
+
+                let formattedText = data.text;
+
+                formattedText = formattedText.replace(
+                    /(^|\s)(<b>)?(--[a-zA-Z0-9][a-zA-Z0-9-]*|-[a-zA-Z0-9])(<\/b>)?/g, 
+                    '$1$2<span class="flag">$3</span>$4'
+                );
+                formattedText = formattedText.replace(
+                    /^(<b>)([A-Z][A-Z\s]+)(<\/b>)$/gm, 
+                    '$1<span class="header">$2</span>$3'
+                );
+
+                // B. Command Flags (-a, --all)
+                formattedText = formattedText.replace(
+                    /(^|\s)(<b>)?(--[a-zA-Z0-9][a-zA-Z0-9-]*|-[a-zA-Z0-9])(<\/b>)?/g, 
+                    '$1$2<span class="flag">$3</span>$4'
+                );
+
+                // C. Cross-References like ls(1) or chmod(2)
+                // Looks for word characters followed immediately by parenthesis with a number
+                formattedText = formattedText.replace(
+                    /([a-zA-Z0-9_.-]+)\(([1-9][a-z]?)\)/g, 
+                    '<span class="ref">$1($2)</span>'
+                );
+
+                // D. File Paths (/usr/bin/ls, ~/.bashrc, /etc/passwd)
+                // Looks for strings starting with / or ~/ containing at least one internal slash
+                formattedText = formattedText.replace(
+                    /(^|\s|>)((?:\/|~\/)[\w.-]+(?:\/[\w.-]+)+)/g, 
+                    '$1<span class="path">$2</span>'
+                );
+
+                document.getElementById('content-pane').scrollTop = 0;
+
+                // REMOVE the centering class before inserting the text!
+                viewer.classList.remove('empty-state');
+                viewer.innerHTML = `<pre>${formattedText}</pre>`;
+
+                // REMOVE the centering class before inserting the text!
+                viewer.classList.remove('empty-state');
+                viewer.innerHTML = `<pre>${formattedText}</pre>`;
+
+                // Reset scroll position to the very top
+                document.getElementById('content-pane').scrollTop = 0;
+
+            } catch (err) {
+                viewer.classList.add('empty-state');
+                viewer.innerHTML = `<div style="color: #ef4444;">Failed to load document.</div>`;
+            }
+        }
+        </script>
+    </body>
+</html>

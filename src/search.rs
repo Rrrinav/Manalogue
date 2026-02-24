@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rust_stemmers::Stemmer;
+use serde::Serialize;
 
 use crate::constants::*;
 use crate::index::MmapIndex;
@@ -66,6 +67,7 @@ fn semantic_desc_score(
     f1 * f1
 }
 
+#[derive(Serialize)]
 pub struct SearchResult {
     pub doc_id: u32,
     pub fname: String,

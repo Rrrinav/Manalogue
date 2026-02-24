@@ -12,5 +12,9 @@ name = "search"
 path = "src/bin/search.rs"
 
 [dependencies]
+axum = "0.8.8"
 memmap2 = "0.9.10"
 rust-stemmers = "1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.49.0", features = ["full"] }
