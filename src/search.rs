@@ -3,11 +3,15 @@ use std::collections::{HashMap, HashSet};
 use rust_stemmers::Stemmer;
 
 use crate::constants::*;
-use crate::index::Index;
+use crate::index::MmapIndex;
 use crate::text::{edit_distance, make_stemmer, tokenize};
 
-fn query_idf(token: &str, inverted: &HashMap<String, Vec<(u32, f32)>>, n: f32) -> f32 {
-    let df = inverted.get(token).map(|p| p.len()).unwrap_or(1) as f32;
+fn query_idf(token: &str, index: &MmapIndex, n: f32) -> f32 {
+    let df = index
+        .inverted_dict
+        .get(token)
+        .map(|&(_, len)| len)
+        .unwrap_or(1) as f32;
     ((n - df + 0.5) / (df + 0.5) + 1.0).ln().max(0.01)
 }
 
@@ -26,7 +30,6 @@ fn semantic_desc_score(
         return 0.0;
     }
 
-    // High-IDF query terms must all appear in the description (hard filter)
     let mut idfs: Vec<f32> = token_idfs.values().copied().collect();
     idfs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_idf = idfs.get(idfs.len() / 2).copied().unwrap_or(0.0);
@@ -39,7 +42,6 @@ fn semantic_desc_score(
         }
     }
 
-    // IDF-weighted coverage x precision -> F1^2
     let mut idf_overlap = 0.0f32;
     let mut total_query_idf = 0.0f32;
     for qt in query_tokens {
@@ -71,7 +73,7 @@ pub struct SearchResult {
     pub score: f32,
 }
 
-pub fn search(query: &str, index: &Index) -> Vec<SearchResult> {
+pub fn search(query: &str, index: &MmapIndex) -> Vec<SearchResult> {
     let stemmer = make_stemmer();
     let query_tokens_vec = tokenize(query, &stemmer);
     if query_tokens_vec.is_empty() {
@@ -83,42 +85,43 @@ pub fn search(query: &str, index: &Index) -> Vec<SearchResult> {
 
     let token_idfs: HashMap<String, f32> = query_tokens_vec
         .iter()
-        .map(|t| (t.clone(), query_idf(t, &index.inverted, n)))
+        .map(|t| (t.clone(), query_idf(t, index, n)))
         .collect();
     let total_idf: f32 = token_idfs.values().sum();
 
-    // Phase 1: BM25 retrieval with prefix & fuzzy expansion
     let mut doc_score: HashMap<u32, f32> = HashMap::new();
     let mut doc_matched_idf: HashMap<u32, f32> = HashMap::new();
 
     for (token, &tok_idf) in query_tokens_vec.iter().zip(token_idfs.values()) {
         let mut token_posts: HashMap<u32, f32> = HashMap::new();
 
-        // Exact match
-        if let Some(postings) = index.inverted.get(token) {
-            for &(doc_id, score) in postings {
+        // Exact match via mmap
+        if let Some(postings) = index.get_postings(token) {
+            for (doc_id, score) in postings {
                 *token_posts.entry(doc_id).or_insert(0.0) += score;
             }
         }
 
         // Prefix expansion
         if token.len() >= PREFIX_MIN_LEN && tok_idf > PREFIX_MIN_IDF {
-            for (key, postings) in &index.inverted {
+            for (key, _) in &index.inverted_dict {
                 if key != token && key.starts_with(token.as_str()) {
                     let penalty = (0.6f32).powf((key.len() - token.len()) as f32 + 1.0);
-                    for &(doc_id, score) in postings {
-                        *token_posts.entry(doc_id).or_insert(0.0) += score * penalty;
+                    if let Some(postings) = index.get_postings(key) {
+                        for (doc_id, score) in postings {
+                            *token_posts.entry(doc_id).or_insert(0.0) += score * penalty;
+                        }
                     }
                 }
             }
         }
 
-        // Fuzzy fallback (edit-distance <= 1) when no match found
+        // Fuzzy fallback (edit-distance <= 1)
         if token_posts.is_empty() && token.len() >= FUZZY_MIN_LEN {
-            for key in index.inverted.keys() {
+            for key in index.inverted_dict.keys() {
                 if key.len().abs_diff(token.len()) <= 1 && edit_distance(key, token, 1) <= 1 {
-                    if let Some(postings) = index.inverted.get(key) {
-                        for &(doc_id, score) in postings {
+                    if let Some(postings) = index.get_postings(key) {
+                        for (doc_id, score) in postings {
                             *token_posts.entry(doc_id).or_insert(0.0) += score * 0.5;
                         }
                     }
@@ -126,7 +129,6 @@ pub fn search(query: &str, index: &Index) -> Vec<SearchResult> {
             }
         }
 
-        // Ensure docs whose NAME description contains this token are candidates
         if let Some(desc_docs) = index.desc_index.get(token) {
             for &doc_id in desc_docs {
                 token_posts.entry(doc_id).or_insert(0.0);
@@ -142,7 +144,6 @@ pub fn search(query: &str, index: &Index) -> Vec<SearchResult> {
         }
     }
 
-    // AND-style coverage bonus
     let and_exp = (query_tokens_vec.len() as f32 - 1.0).max(2.0);
     let mut candidates: Vec<(u32, f32)> = doc_score
         .into_iter()
@@ -158,7 +159,6 @@ pub fn search(query: &str, index: &Index) -> Vec<SearchResult> {
 
     candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Phase 2: Semantic re-ranking of top-N candidates
     let mut reranked: Vec<(u32, f32)> = candidates
         .into_iter()
         .take(SEMANTIC_RERANK_N)
@@ -175,7 +175,6 @@ pub fn search(query: &str, index: &Index) -> Vec<SearchResult> {
 
     reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Phase 3: Deduplicate — keep best-scoring variant per command name
     let mut best_for_base: HashMap<String, (u32, f32)> = HashMap::new();
     for &(doc_id, score) in &reranked {
         let base = index.doc_map[doc_id as usize]
@@ -205,7 +204,7 @@ pub fn search(query: &str, index: &Index) -> Vec<SearchResult> {
         .collect()
 }
 
-pub fn search_and_print(query: &str, index: &Index, top_k: usize) {
+pub fn search_and_print(query: &str, index: &MmapIndex, top_k: usize) {
     let stemmer = make_stemmer();
     let tokens = tokenize(query, &stemmer);
 

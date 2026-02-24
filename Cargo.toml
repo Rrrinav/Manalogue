@@ -12,4 +12,5 @@ name = "search"
 path = "src/bin/search.rs"
 
 [dependencies]
+memmap2 = "0.9.10"
 rust-stemmers = "1.0"

@@ -1,25 +1,56 @@
+use memmap2::MmapOptions;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, Write};
 
 use crate::constants::*;
 use crate::crawl::CrawlStats;
 use crate::doc::doc_type_multiplier;
 use crate::io_util::*;
 
+// Used during Pass 2 to build the index in RAM
 pub struct Index {
-    /// Filename of each document (indexed by doc_id).
     pub doc_map: Vec<String>,
-    /// Stemmed command name for each document.
     pub cmd_names: Vec<String>,
-    /// Raw NAME-section description for each document (used for semantic re-ranking).
     pub name_descs: Vec<String>,
-    /// Main BM25 inverted index: term → sorted (doc_id, score) postings.
     pub inverted: HashMap<String, Vec<(u32, f32)>>,
-    /// cmd_name → [doc_id] (exact command-name lookup).
     pub cmd_name_index: HashMap<String, Vec<u32>>,
-    /// term → [doc_id] for terms that appear in the NAME description.
     pub desc_index: HashMap<String, Vec<u32>>,
+}
+
+// Used during Querying to read from disk instantly
+pub struct MmapIndex {
+    pub doc_map: Vec<String>,
+    pub cmd_names: Vec<String>,
+    pub name_descs: Vec<String>,
+    pub inverted_dict: HashMap<String, (u64, u32)>, // word -> (byte_offset, num_postings)
+    pub cmd_name_index: HashMap<String, Vec<u32>>,
+    pub desc_index: HashMap<String, Vec<u32>>,
+    mmap: memmap2::Mmap,
+}
+
+impl MmapIndex {
+    /// Reads a posting list directly from the memory-mapped file
+    pub fn get_postings(&self, word: &str) -> Option<Vec<(u32, f32)>> {
+        let &(offset, len) = self.inverted_dict.get(word)?;
+        let mut postings = Vec::with_capacity(len as usize);
+        let mut pos = offset as usize;
+
+        for _ in 0..len {
+            let mut doc_bytes = [0u8; 4];
+            doc_bytes.copy_from_slice(&self.mmap[pos..pos + 4]);
+            let doc_id = u32::from_le_bytes(doc_bytes);
+            pos += 4;
+
+            let mut score_bytes = [0u8; 4];
+            score_bytes.copy_from_slice(&self.mmap[pos..pos + 4]);
+            let score = f32::from_le_bytes(score_bytes);
+            pos += 4;
+
+            postings.push((doc_id, score));
+        }
+        Some(postings)
+    }
 }
 
 #[inline]
@@ -70,15 +101,16 @@ pub fn build_index(temp_path: &str, stats: &CrawlStats) -> io::Result<Index> {
         name_descs.push(name_desc_raw);
 
         if !cmd_name.is_empty() {
-            cmd_name_index.entry(cmd_name.clone()).or_default().push(doc_id);
+            cmd_name_index
+                .entry(cmd_name.clone())
+                .or_default()
+                .push(doc_id);
         }
 
-        // Build desc_index (term → doc_id)
         for term in desc_tf.keys() {
             desc_index.entry(term.clone()).or_default().push(doc_id);
         }
 
-        // Collect all unique terms across all fields
         let all_terms: HashSet<String> = desc_tf
             .keys()
             .chain(synopsis_tf.keys())
@@ -134,12 +166,14 @@ pub fn build_index(temp_path: &str, stats: &CrawlStats) -> io::Result<Index> {
 
             let score = (cmd_score + desc_score + syn_score + body_score) * type_mult;
             if score > 0.0 {
-                inverted.entry(term.clone()).or_default().push((doc_id, score));
+                inverted
+                    .entry(term.clone())
+                    .or_default()
+                    .push((doc_id, score));
             }
         }
     }
 
-    // Sort each posting list highest-score-first
     for postings in inverted.values_mut() {
         postings.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     }
@@ -157,6 +191,7 @@ pub fn build_index(temp_path: &str, stats: &CrawlStats) -> io::Result<Index> {
 pub fn save_index(path: &str, index: &Index) -> io::Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
 
+    // 1. Write docs metadata
     write_u32(&mut w, index.doc_map.len() as u32)?;
     for i in 0..index.doc_map.len() {
         write_str(&mut w, &index.doc_map[i])?;
@@ -164,29 +199,54 @@ pub fn save_index(path: &str, index: &Index) -> io::Result<()> {
         write_str(&mut w, &index.name_descs[i])?;
     }
 
-    write_u32(&mut w, index.inverted.len() as u32)?;
+    // 2. Write Postings dynamically and track offsets
+    let mut dict = Vec::with_capacity(index.inverted.len());
     for (word, postings) in &index.inverted {
-        write_str(&mut w, word)?;
-        write_u32(&mut w, postings.len() as u32)?;
+        let offset = w.stream_position()?;
         for &(doc_id, score) in postings {
             write_u32(&mut w, doc_id)?;
             write_f32(&mut w, score)?;
         }
+        dict.push((word.clone(), offset, postings.len() as u32));
     }
+
+    // 3. Write Dictionary
+    let dict_offset = w.stream_position()?;
+    write_u32(&mut w, dict.len() as u32)?;
+    for (word, offset, len) in dict {
+        write_str(&mut w, &word)?;
+        w.write_all(&offset.to_le_bytes())?;
+        write_u32(&mut w, len)?;
+    }
+
+    // 4. Write Footer (8 bytes pointing to the dictionary)
+    w.write_all(&dict_offset.to_le_bytes())?;
 
     w.flush()
 }
 
-/// Load a previously saved index from disk.
-pub fn load_index(path: &str) -> io::Result<Index> {
-    let mut r = BufReader::new(File::open(path)?);
+pub fn load_index(path: &str) -> io::Result<MmapIndex> {
+    let file = File::open(path)?;
+    let mmap = unsafe { MmapOptions::new().map(&file)? };
 
+    let len = mmap.len();
+    if len < 8 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "File too small"));
+    }
+
+    // Read the footer to find the dictionary
+    let mut footer = [0u8; 8];
+    footer.copy_from_slice(&mmap[len - 8..]);
+    let dict_offset = u64::from_le_bytes(footer) as usize;
+
+    // 1. Read metadata from the start
+    let mut r = Cursor::new(&mmap[..dict_offset]);
     let doc_count = read_u32(&mut r)? as usize;
+
     let mut doc_map = Vec::with_capacity(doc_count);
     let mut cmd_names = Vec::with_capacity(doc_count);
     let mut name_descs = Vec::with_capacity(doc_count);
     let mut cmd_name_index: HashMap<String, Vec<u32>> = HashMap::new();
-    let mut desc_index: HashMap<String, Vec<u32>> = HashMap::new();
 
     for doc_id in 0..doc_count {
         let fname = read_str(&mut r)?;
@@ -199,48 +259,44 @@ pub fn load_index(path: &str) -> io::Result<Index> {
                 .or_default()
                 .push(doc_id as u32);
         }
-
         doc_map.push(fname);
         cmd_names.push(cmd_name);
         name_descs.push(name_desc);
     }
 
-    let term_count = read_u32(&mut r)? as usize;
-    let mut inverted: HashMap<String, Vec<(u32, f32)>> = HashMap::with_capacity(term_count);
+    // 2. Read the dictionary into memory
+    let mut r_dict = Cursor::new(&mmap[dict_offset..len - 8]);
+    let dict_len = read_u32(&mut r_dict)?;
+    let mut inverted_dict = HashMap::with_capacity(dict_len as usize);
 
-    for _ in 0..term_count {
-        let word = read_str(&mut r)?;
-        let n = read_u32(&mut r)? as usize;
-        let mut postings = Vec::with_capacity(n);
-        for _ in 0..n {
-            let doc_id = read_u32(&mut r)?;
-            let score = read_f32(&mut r)?;
-            postings.push((doc_id, score));
-        }
-        inverted.insert(word, postings);
+    for _ in 0..dict_len {
+        let word = read_str(&mut r_dict)?;
+        let mut off_buf = [0u8; 8];
+        r_dict.read_exact(&mut off_buf)?;
+        let offset = u64::from_le_bytes(off_buf);
+        let num_postings = read_u32(&mut r_dict)?;
+
+        inverted_dict.insert(word, (offset, num_postings));
     }
 
-    // Re-build desc_index from the loaded inverted index + name_descs
-    // (we re-derive it rather than storing it to keep the file format simpler)
+    // 3. Rebuild desc_index
     use crate::text::make_stemmer;
     use crate::text::tokenize;
     let stemmer = make_stemmer();
+    let mut desc_index: HashMap<String, Vec<u32>> = HashMap::new();
     for (doc_id, desc) in name_descs.iter().enumerate() {
         for token in tokenize(desc, &stemmer) {
-            desc_index
-                .entry(token)
-                .or_default()
-                .push(doc_id as u32);
+            desc_index.entry(token).or_default().push(doc_id as u32);
         }
     }
 
-    Ok(Index {
+    Ok(MmapIndex {
         doc_map,
         cmd_names,
         name_descs,
-        inverted,
+        inverted_dict,
         cmd_name_index,
         desc_index,
+        mmap,
     })
 }
-
