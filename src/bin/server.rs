@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 
-use man_search::constants::FINAL_INDEX_PATH;
+use man_search::constants::SERVER_INDEX_PATH;
 use man_search::index::{load_index, MmapIndex};
 use man_search::search::{search, SearchResult};
 
@@ -244,8 +244,8 @@ async fn content_api(
 
 #[tokio::main]
 async fn main() {
-    println!("Loading memory-mapped index from {}...", FINAL_INDEX_PATH);
-    let index = load_index(FINAL_INDEX_PATH).unwrap_or_else(|_| {
+    println!("Loading memory-mapped index from {}...", SERVER_INDEX_PATH);
+    let index = load_index(SERVER_INDEX_PATH).unwrap_or_else(|_| {
         eprintln!("Failed to load index. Run `cargo run --bin index` first.");
         std::process::exit(1);
     });
