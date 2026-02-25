@@ -22,7 +22,7 @@ pub const FUZZY_MIN_LEN: usize = 4;
 
 // Index file paths
 pub const TEMP_INDEX_PATH: &str = "temp_index.bin";
-pub const FINAL_INDEX_PATH: &str = "man.idx";
+pub const FINAL_INDEX_PATH: &str = "temp-man.idx";
 
 // Source directories
 pub const SOURCE_DIRS: [&str; 2] = ["man-pages-6.9.1/man", "pure_coreutils_man/"];

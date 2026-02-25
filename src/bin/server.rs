@@ -261,7 +261,7 @@ async fn main() {
         .route("/api/content", get(content_api))
         .with_state(state);
 
-    let listener = TcpListener::bind("127.0.0.1:3000").await.unwrap();
-    println!("Server running at http://127.0.0.1:3000");
+    let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    println!("Server running at http://0.0.0.0:3000");
     axum::serve(listener, app).await.unwrap();
 }

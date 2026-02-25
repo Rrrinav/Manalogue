@@ -510,7 +510,6 @@
   let debounceTimer = null;
   let currentQuery = '';
 
-  // ── Search ────────────────────────────────────────────────────────────────
   input.addEventListener('input', () => {
     clearTimeout(debounceTimer);
     const q = input.value.trim();
