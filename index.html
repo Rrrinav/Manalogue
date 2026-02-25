@@ -539,16 +539,13 @@
     activeIdx = -1;
     setStatus('', 'ready');
     resultsList.innerHTML = `<div class="empty-state">
-      <pre class="ascii">  ___  ___  __   __  ___
- |    |    |  | |__| |
- |___ |___ |__| |  \\ |___</pre>
-      <p>type to search 6000+ man pages</p>
+      <p>type to search 2900+ man pages</p>
     </div>`;
   }
 
   function renderResults(data, q) {
     if (!data.length) {
-      resultsList.innerHTML = `<div class="empty-state"><p>no results for <em style="color:var(--amber)">${escHtml(q)}</em></p></div>`;
+          resultsList.innerHTML = `<div class="empty-state"><p>no results for <em style="color:var(--amber)">${q}</em></p></div>`;
       return;
     }
 
@@ -558,10 +555,10 @@
       const desc = r.name_desc ? r.name_desc : '';
       return `<div class="result-item" data-idx="${i}" data-fname="${escAttr(r.fname)}">
         <div class="result-header">
-          <div class="result-name"><span class="cmd">${hlQuery(escHtml(cmd), q)}</span></div>
-          ${section ? `<span class="result-section">${escHtml(section)}</span>` : ''}
+          <div class="result-name"><span class="cmd">${hlQuery(cmd, q)}</span></div>
+          ${section ? `<span class="result-section">${section}</span>` : ''}
         </div>
-        ${desc ? `<div class="result-desc">${escHtml(desc)}</div>` : ''}
+        ${desc ? `<div class="result-desc">${desc}</div>` : ''}
         <span class="result-score">${r.score.toFixed(1)}</span>
       </div>`;
     }).join('');
@@ -585,13 +582,12 @@
     activeIdx = idx;
   }
 
-  // ── Content loading ───────────────────────────────────────────────────────
   async function loadContent(fname) {
     const [cmd, ...rest] = fname.split('.');
     const section = rest.join('.') || '';
 
     contentHeader.style.display = 'flex';
-    contentTitle.innerHTML = `<b style="color:var(--amber)">${escHtml(cmd)}</b>${section ? `<span class="section-badge">${escHtml(section)}</span>` : ''}`;
+    contentTitle.innerHTML = `<b style="color:var(--amber)">${cmd}</b>${section ? `<span class="section-badge">${section}</span>` : ''}`;
     contentBody.innerHTML = `<div style="display:flex;align-items:center;gap:10px;padding:40px 0;color:var(--muted)"><span class="spinner"></span> loading man page…</div>`;
 
     try {
@@ -613,14 +609,13 @@
         const trimmed = line.trim();
         // All-caps section headers (NAME, SYNOPSIS, etc.)
         if (/^[A-Z][A-Z\s_\-]{2,}$/.test(trimmed) && trimmed.length > 2) {
-          return `<span class="man-section">${escHtml(trimmed)}</span>`;
+          return `<span class="man-section">${trimmed}</span>`;
         }
-        return escHtml(line);
+        return line;
       })
       .join('\n');
   }
 
-  // ── Keyboard nav ──────────────────────────────────────────────────────────
   input.addEventListener('keydown', e => {
     if (!results.length) return;
     if (e.key === 'ArrowDown') {
@@ -645,26 +640,17 @@
   function closeContent() {
     contentHeader.style.display = 'none';
     contentBody.innerHTML = `<div class="content-placeholder">
-      <pre class="big-ascii">
- ██████████████████████████████████████
- █                                    █
- █   SELECT A RESULT TO VIEW THE     █
- █   MAN PAGE                        █
- █                                   █
- ██████████████████████████████████████</pre>
       <p>← search something on the left</p>
     </div>`;
     resultsList.querySelectorAll('.result-item').forEach(el => el.classList.remove('active'));
     activeIdx = -1;
   }
 
-  // ── Status ────────────────────────────────────────────────────────────────
   function setStatus(state, msg) {
     statusDot.className = 'status-dot' + (state ? ' ' + state : '');
     statusText.textContent = msg;
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
   function escHtml(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
